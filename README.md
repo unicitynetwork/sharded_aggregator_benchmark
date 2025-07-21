@@ -253,11 +253,12 @@ Examples:
 Usage: smt-benchmark-threaded-aggregator [options] [commitments_per_thread] [thread_count]
 
 Options:
-  -n, --count     Number of commitments per round (default: 1)
+  -n, --count     Number of commitments per thread/round (default: 1)
   -t, --threads   Number of threads (default: 1)
-  -r, --rounds    Number of rounds per thread (default: 1)
+  -r, --rounds    Number of rounds (default: 1)
   -d, --duration  Duration per round (e.g., 1s, 500ms). Overrides -n
   -s, --submit    Submit tree roots to Unicity aggregator
+  -c, --combine   Combine all thread trees into single tree before submission
 
 Examples:
   smt-benchmark-threaded-aggregator -s                      # Submit 1 root from 1 thread, 1 round
@@ -265,6 +266,12 @@ Examples:
   smt-benchmark-threaded-aggregator -n 1000 -t 8 -r 10 -s   # 1000/round, 8 threads, 10 rounds
   smt-benchmark-threaded-aggregator -d 1s -t 4 -r 5 -s      # 5 rounds of 1s each, 4 threads (5s total)
   smt-benchmark-threaded-aggregator -d 500ms -t 8 -r 3      # 3 rounds of 500ms each, 8 threads (1.5s total)
+
+Combined mode examples:
+  smt-benchmark-threaded-aggregator -n 1000 -t 8 -c -s      # 8 threads generate 1000 commits each, combine into 1 tree
+  smt-benchmark-threaded-aggregator -n 1000 -t 8 -r 5 -c -s # Same but repeat 5 times
+  smt-benchmark-threaded-aggregator -d 1s -t 8 -c -s        # 8 threads generate for 1s, combine into 1 tree
+  smt-benchmark-threaded-aggregator -d 1s -t 8 -r 10 -c -s  # Same but repeat 10 times
 ```
 
 With the rounds feature, each thread:
@@ -272,6 +279,14 @@ With the rounds feature, each thread:
 2. Optionally submits the root hash to the aggregator
 3. Clears the tree from memory (garbage collection)
 4. Repeats for the specified number of rounds
+
+With the combined mode (-c flag):
+1. All threads generate commitments in parallel
+2. Commitments from all threads are combined into a single tree
+3. Only one root hash is submitted to the aggregator
+4. This simulates a multi-threaded aggregator building a single consensus tree
+5. Supports both count-based (-n) and duration-based (-d) generation
+6. In duration mode, thread 0 acts as coordinator for timing cutoffs
 
 This allows for sustained load testing and memory efficiency verification.
 

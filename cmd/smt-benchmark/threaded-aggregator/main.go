@@ -8,11 +8,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,8 +32,7 @@ const (
 	batchSize            = 1000
 	algorithmID          = "secp256k1"
 	sha256Prefix         = "0000" // Algorithm prefix for SHA256
-	aggregatorURL        = "https://goaggregator-test.unicity.network"
-	aggregatorEndpoint   = "/api/v1/rpc"
+	aggregatorURL        = "https://goggregator-test.unicity.network"
 )
 
 // SubmitCommitmentRequest represents the JSON-RPC request to submit a commitment
@@ -65,32 +67,56 @@ type JSONRPCError struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
+// InclusionProof represents the response from get_inclusion_proof
+type InclusionProof struct {
+	Authenticator   Authenticator   `json:"authenticator"`
+	MerkleTreePath  MerkleTreePath  `json:"merkleTreePath"`
+	TransactionHash string          `json:"transactionHash"`
+}
+
+// MerkleTreePath represents the merkle tree path in the proof
+type MerkleTreePath struct {
+	Root  string      `json:"root"`
+	Steps []ProofStep `json:"steps"`
+}
+
+// ProofStep represents a single step in the merkle proof
+type ProofStep struct {
+	Branch  []string    `json:"branch"`
+	Path    string      `json:"path"`
+	Sibling interface{} `json:"sibling"`
+}
+
 // ThreadResult holds the benchmark results for a single thread
 type ThreadResult struct {
-	ThreadID             int
-	NumCommitments       int
-	GenerationTime       time.Duration
-	SMTBuildTime         time.Duration
-	RootCalculationTime  time.Duration
-	AggregatorSubmitTime time.Duration
-	TotalTime            time.Duration
-	RootHash             string
-	AggregatorResponse   string
-	Error                error
+	ThreadID               int
+	NumCommitments         int
+	GenerationTime         time.Duration
+	SMTBuildTime           time.Duration
+	RootCalculationTime    time.Duration
+	AggregatorSubmitTime   time.Duration
+	InclusionProofWaitTime time.Duration
+	TotalTime              time.Duration
+	RootHash               string
+	SubmittedRequestID     string
+	AggregatorResponse     string
+	InclusionProof         *InclusionProof
+	Error                  error
 }
 
 // AggregatedResults holds the combined results from all threads
 type AggregatedResults struct {
-	TotalCommitments     int
-	TotalThreads         int
-	TotalGenerationTime  time.Duration
-	TotalSMTBuildTime    time.Duration
-	TotalRootCalcTime    time.Duration
-	TotalAggregatorTime  time.Duration
-	WallClockTime        time.Duration
-	ThreadResults        []ThreadResult
-	AvgCommitsPerSec     float64
-	TotalCommitsPerSec   float64
+	TotalCommitments       int
+	TotalThreads           int
+	TotalGenerationTime    time.Duration
+	TotalSMTBuildTime      time.Duration
+	TotalRootCalcTime      time.Duration
+	TotalAggregatorTime    time.Duration
+	TotalInclusionProofTime time.Duration
+	WallClockTime          time.Duration
+	ThreadResults          []ThreadResult
+	AvgCommitsPerSec       float64
+	TotalCommitsPerSec     float64
 }
 
 // Commitment represents a state transition commitment
@@ -247,38 +273,41 @@ func generateValidCommitment(threadID, index int) (*Commitment, error) {
 	pubKey := privKey.PubKey()
 	pubKeyBytes := pubKey.SerializeCompressed()
 	
-	// Generate random state hash (32 bytes)
-	stateHashBytes := make([]byte, 32)
-	if _, err := rand.Read(stateHashBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate state hash: %w", err)
+	// Generate random state data and create DataHash imprint
+	stateData := make([]byte, 32)
+	if _, err := rand.Read(stateData); err != nil {
+		return nil, fmt.Errorf("failed to generate state data: %w", err)
 	}
-	stateHashImprint := sha256Prefix + hex.EncodeToString(stateHashBytes)
+	stateHashImprint := createDataHashImprint(stateData)
 	
-	// Calculate request ID: SHA256(publicKey || stateHashImprint)
-	requestIDHasher := sha256.New()
-	requestIDHasher.Write(pubKeyBytes)
-	requestIDHasher.Write([]byte(stateHashImprint))
-	requestIDBytes := requestIDHasher.Sum(nil)
-	requestID := sha256Prefix + hex.EncodeToString(requestIDBytes)
-	
-	// Generate random transaction hash (32 bytes)
-	txHashBytes := make([]byte, 32)
-	if _, err := rand.Read(txHashBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate transaction hash: %w", err)
+	// Create request ID from public key and state hash imprint
+	requestID, err := createRequestID(pubKeyBytes, stateHashImprint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request ID: %w", err)
 	}
-	transactionHash := sha256Prefix + hex.EncodeToString(txHashBytes)
 	
-	// Sign the transaction hash (without prefix)
-	signature := ecdsa.Sign(privKey, txHashBytes)
+	// Generate random transaction data and create DataHash imprint
+	transactionData := make([]byte, 32)
+	if _, err := rand.Read(transactionData); err != nil {
+		return nil, fmt.Errorf("failed to generate transaction data: %w", err)
+	}
+	transactionHashImprint := createDataHashImprint(transactionData)
 	
-	// Convert signature to 65-byte format (R || S || V)
-	sigBytes := signature.Serialize()
-	// Add recovery ID as the 65th byte (simplified, using 0)
-	sigBytesWithRecovery := append(sigBytes, 0)
+	// Extract transaction hash bytes for signing (skip algorithm prefix)
+	txHashBytes, err := hex.DecodeString(transactionHashImprint[4:]) // Skip "0000" prefix
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode transaction hash: %w", err)
+	}
+	
+	// Sign the transaction hash bytes using compact format
+	compactSig := ecdsa.SignCompact(privKey, txHashBytes, true) // true for compressed public key
+	
+	// Convert from btcec's [V || R || S] format to Unicity's [R || S || V] format
+	sigBytesWithRecovery := convertBtcecToUnicity(compactSig)
 	
 	commitment := &Commitment{
 		RequestID:       requestID,
-		TransactionHash: transactionHash,
+		TransactionHash: transactionHashImprint,
 		Authenticator: Authenticator{
 			Algorithm: algorithmID,
 			PublicKey: hex.EncodeToString(pubKeyBytes),
@@ -334,41 +363,94 @@ func getHostID() string {
 	return hostname
 }
 
+// convertBtcecToUnicity converts a signature from btcec's [V || R || S] format 
+// to Unicity's [R || S || V] format
+func convertBtcecToUnicity(compactSig []byte) []byte {
+	// For compressed keys, btcec's V is 31-34. We normalize it to 0 or 1.
+	v := compactSig[0] - 31
+	r := compactSig[1:33]
+	sigS := compactSig[33:65]
+
+	signature := make([]byte, 65)
+	copy(signature[0:32], r)
+	copy(signature[32:64], sigS)
+	signature[64] = v
+
+	return signature
+}
+
+// createDataHashImprint creates a DataHash imprint in the Unicity format:
+// 2 bytes algorithm (big-endian) + actual hash bytes
+// For SHA256: algorithm = 0, so prefix is [0x00, 0x00]
+func createDataHashImprint(data []byte) string {
+	// Hash the data with SHA256
+	hash := sha256.Sum256(data)
+	
+	// Create imprint: algorithm (0x00, 0x00 for SHA256) + hash
+	imprint := make([]byte, 2+len(hash))
+	imprint[0] = 0x00 // SHA256 algorithm high byte
+	imprint[1] = 0x00 // SHA256 algorithm low byte
+	copy(imprint[2:], hash[:])
+	
+	return hex.EncodeToString(imprint)
+}
+
+// createRequestID creates a RequestID from public key and state hash imprint
+func createRequestID(publicKey []byte, stateHashImprint string) (string, error) {
+	// Decode the imprint to get the full bytes (algorithm + hash)
+	stateHashBytes, err := hex.DecodeString(stateHashImprint)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode state hash imprint: %w", err)
+	}
+	
+	// Create the data to hash: publicKey + stateHashBytes (full imprint)
+	data := make([]byte, 0, len(publicKey)+len(stateHashBytes))
+	data = append(data, publicKey...)
+	data = append(data, stateHashBytes...)
+	
+	// Hash and create request ID with algorithm prefix
+	requestIDHash := sha256.Sum256(data)
+	return fmt.Sprintf("0000%x", requestIDHash), nil
+}
+
 // submitToAggregator submits the tree root to the Unicity aggregator
-func submitToAggregator(hostID string, threadID int, rootHash []byte, numCommitments int, privKey *btcec.PrivateKey) (string, error) {
+func submitToAggregator(hostID string, threadID int, rootHash []byte, numCommitments int, privKey *btcec.PrivateKey) (string, string, error) {
 	// Generate timestamp
 	timestamp := time.Now().UnixNano()
 	
-	// Create state hash from host ID, thread ID, and timestamp
-	stateHashData := fmt.Sprintf("%s-%d-%d", hostID, threadID, timestamp)
-	stateHasher := sha256.New()
-	stateHasher.Write([]byte(stateHashData))
-	stateHashBytes := stateHasher.Sum(nil)
-	stateHashImprint := sha256Prefix + hex.EncodeToString(stateHashBytes)
+	// Create state data from host ID, thread ID, and timestamp
+	stateData := []byte(fmt.Sprintf("%s-%d-%d", hostID, threadID, timestamp))
+	stateHashImprint := createDataHashImprint(stateData)
 	
 	// Create request ID from public key and state hash
 	pubKey := privKey.PubKey()
 	pubKeyBytes := pubKey.SerializeCompressed()
 	
-	requestIDHasher := sha256.New()
-	requestIDHasher.Write(pubKeyBytes)
-	requestIDHasher.Write([]byte(stateHashImprint))
-	requestIDBytes := requestIDHasher.Sum(nil)
-	requestID := sha256Prefix + hex.EncodeToString(requestIDBytes)
+	requestID, err := createRequestID(pubKeyBytes, stateHashImprint)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create request ID: %w", err)
+	}
 	
-	// Use root hash as transaction hash
-	transactionHash := sha256Prefix + hex.EncodeToString(rootHash)
+	// Create transaction hash imprint from root hash
+	transactionHashImprint := createDataHashImprint(rootHash)
 	
-	// Sign the root hash
-	signature := ecdsa.Sign(privKey, rootHash)
-	sigBytes := signature.Serialize()
-	sigBytesWithRecovery := append(sigBytes, 0)
+	// Extract just the hash bytes (skip algorithm prefix) for signing
+	txHashBytes, err := hex.DecodeString(transactionHashImprint[4:]) // Skip "0000" prefix
+	if err != nil {
+		return "", requestID, fmt.Errorf("failed to decode transaction hash: %w", err)
+	}
+	
+	// Sign the transaction hash bytes using compact format
+	compactSig := ecdsa.SignCompact(privKey, txHashBytes, true) // true for compressed public key
+	
+	// Convert from btcec's [V || R || S] format to Unicity's [R || S || V] format
+	sigBytesWithRecovery := convertBtcecToUnicity(compactSig)
 	
 	// Create the submission request
 	receipt := true
 	submitReq := SubmitCommitmentRequest{
 		RequestID:       requestID,
-		TransactionHash: transactionHash,
+		TransactionHash: transactionHashImprint,
 		Authenticator: Authenticator{
 			Algorithm: algorithmID,
 			PublicKey: hex.EncodeToString(pubKeyBytes),
@@ -390,13 +472,13 @@ func submitToAggregator(hostID string, threadID int, rootHash []byte, numCommitm
 	// Marshal to JSON
 	reqBody, err := json.Marshal(rpcReq)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", requestID, fmt.Errorf("failed to marshal request: %w", err)
 	}
 	
 	// Create HTTP request
-	req, err := http.NewRequest("POST", aggregatorURL+aggregatorEndpoint, bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", aggregatorURL, bytes.NewBuffer(reqBody))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return "", requestID, fmt.Errorf("failed to create request: %w", err)
 	}
 	
 	req.Header.Set("Content-Type", "application/json")
@@ -405,22 +487,128 @@ func submitToAggregator(hostID string, threadID int, rootHash []byte, numCommitm
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
+		return "", requestID, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 	
-	// Read response
+	// Read response body first to debug
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", requestID, fmt.Errorf("failed to read response body: %w", err)
+	}
+	
+	// Try to parse as JSON-RPC response
 	var rpcResp JSONRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+	if err := json.Unmarshal(body, &rpcResp); err != nil {
+		// If it fails, log the actual response for debugging
+		return "", requestID, fmt.Errorf("failed to decode response: %w (body: %s)", err, string(body))
 	}
 	
 	// Check for JSON-RPC error
 	if rpcResp.Error != nil {
-		return "", fmt.Errorf("JSON-RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		return "", requestID, fmt.Errorf("JSON-RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 	
-	return string(rpcResp.Result), nil
+	return string(rpcResp.Result), requestID, nil
+}
+
+// getInclusionProof retrieves the inclusion proof for a given request ID
+func getInclusionProof(requestID string, threadID int) (*InclusionProof, error) {
+	// Create JSON-RPC request
+	params := map[string]string{"requestId": requestID}
+	
+	rpcReq := struct {
+		JSONRPC string            `json:"jsonrpc"`
+		Method  string            `json:"method"`
+		Params  map[string]string `json:"params"`
+		ID      int               `json:"id"`
+	}{
+		JSONRPC: "2.0",
+		Method:  "get_inclusion_proof",
+		Params:  params,
+		ID:      threadID,
+	}
+	
+	// Marshal to JSON
+	reqBody, err := json.Marshal(rpcReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	
+	// Create HTTP request
+	req, err := http.NewRequest("POST", aggregatorURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	req.Header.Set("Content-Type", "application/json")
+	
+	// Send request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Read response body first
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	
+	// Try to parse as JSON-RPC response
+	var rpcResp JSONRPCResponse
+	if err := json.Unmarshal(body, &rpcResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w (body: %s)", err, string(body))
+	}
+	
+	// Check for JSON-RPC error
+	if rpcResp.Error != nil {
+		// Error code -32002 typically means not found/not ready yet
+		if rpcResp.Error.Code == -32002 {
+			return nil, fmt.Errorf("not found")
+		}
+		return nil, fmt.Errorf("JSON-RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+	}
+	
+	// Parse the result
+	var proof InclusionProof
+	if err := json.Unmarshal(rpcResp.Result, &proof); err != nil {
+		return nil, fmt.Errorf("failed to parse inclusion proof: %w", err)
+	}
+	
+	return &proof, nil
+}
+
+// waitForInclusionProof polls for the inclusion proof with retries
+func waitForInclusionProof(requestID string, threadID int, maxWaitTime time.Duration) (*InclusionProof, time.Duration, error) {
+	startTime := time.Now()
+	endTime := startTime.Add(maxWaitTime)
+	
+	// Initial delay to allow aggregator to process
+	time.Sleep(100 * time.Millisecond)
+	
+	retryCount := 0
+	for time.Now().Before(endTime) {
+		proof, err := getInclusionProof(requestID, threadID)
+		if err == nil && proof != nil {
+			waitTime := time.Since(startTime)
+			return proof, waitTime, nil
+		}
+		
+		// If error is not "not found", it's a real error
+		if err != nil && !strings.Contains(err.Error(), "not found") {
+			return nil, time.Since(startTime), err
+		}
+		
+		retryCount++
+		// Exponential backoff with max 5 seconds
+		backoff := time.Duration(math.Min(float64(100*math.Pow(2, float64(retryCount))), 5000)) * time.Millisecond
+		time.Sleep(backoff)
+	}
+	
+	return nil, maxWaitTime, fmt.Errorf("timeout waiting for inclusion proof after %v", maxWaitTime)
 }
 
 // runThreadBenchmark runs the benchmark for a single thread
@@ -498,14 +686,34 @@ func runThreadBenchmark(threadID, numCommitments int, submitToAgg bool, wg *sync
 		startAgg := time.Now()
 		
 		hostID := getHostID()
-		response, err := submitToAggregator(hostID, threadID, root, numCommitments, aggregatorPrivKey)
+		response, requestID, err := submitToAggregator(hostID, threadID, root, numCommitments, aggregatorPrivKey)
 		if err != nil {
-			result.AggregatorResponse = fmt.Sprintf("Error: %v", err)
+			result.AggregatorResponse = fmt.Sprintf("Submit Error: %v", err)
+			result.AggregatorSubmitTime = time.Since(startAgg)
 		} else {
-			result.AggregatorResponse = "Success: " + response
+			result.AggregatorResponse = "Submit Success: " + response
+			result.SubmittedRequestID = requestID
+			result.AggregatorSubmitTime = time.Since(startAgg)
+			
+			// Phase 5: Wait for inclusion proof
+			fmt.Printf("Thread %d: Waiting for inclusion proof for request %s...\n", threadID, requestID[:16]+"...")
+			fmt.Printf("Thread %d: Debug - Full Request ID: %s\n", threadID, requestID)
+			fmt.Printf("Thread %d: Debug - Root Hash (Transaction): %s\n", threadID, result.RootHash)
+			
+			proof, waitTime, err := waitForInclusionProof(requestID, threadID, 30*time.Second)
+			if err != nil {
+				fmt.Printf("Thread %d: Failed to get inclusion proof: %v\n", threadID, err)
+				result.AggregatorResponse += fmt.Sprintf(" | Proof Error: %v", err)
+			} else {
+				result.InclusionProof = proof
+				result.InclusionProofWaitTime = waitTime
+				fmt.Printf("Thread %d: Got inclusion proof after %v\n", threadID, waitTime)
+				// Debug: print what we got back
+				if proof.TransactionHash != "" {
+					fmt.Printf("Thread %d: Debug - Proof Transaction Hash: %s\n", threadID, proof.TransactionHash)
+				}
+			}
 		}
-		
-		result.AggregatorSubmitTime = time.Since(startAgg)
 	}
 	
 	result.TotalTime = time.Since(startTotal)
@@ -604,6 +812,7 @@ func aggregateResults(results []ThreadResult, wallClockTime time.Duration) Aggre
 			agg.TotalSMTBuildTime += r.SMTBuildTime
 			agg.TotalRootCalcTime += r.RootCalculationTime
 			agg.TotalAggregatorTime += r.AggregatorSubmitTime
+			agg.TotalInclusionProofTime += r.InclusionProofWaitTime
 		}
 	}
 	
@@ -702,6 +911,13 @@ func main() {
 			fmt.Printf("  Root Calc: %v\n", r.RootCalculationTime)
 			if submitToAgg {
 				fmt.Printf("  Aggregator Submit: %v\n", r.AggregatorSubmitTime)
+				if r.InclusionProof != nil {
+					fmt.Printf("  Inclusion Proof Wait: %v\n", r.InclusionProofWaitTime)
+					fmt.Printf("  Inclusion Proof Details:\n")
+					fmt.Printf("    Merkle Root: %s\n", r.InclusionProof.MerkleTreePath.Root)
+					fmt.Printf("    Proof Steps: %d\n", len(r.InclusionProof.MerkleTreePath.Steps))
+					fmt.Printf("    Transaction Hash: %s\n", r.InclusionProof.TransactionHash)
+				}
 			}
 			fmt.Printf("  Total: %v\n", r.TotalTime)
 			fmt.Printf("  Root Hash: %s\n", r.RootHash)
@@ -724,6 +940,7 @@ func main() {
 	fmt.Printf("  Root Calc: %v\n", agg.TotalRootCalcTime)
 	if submitToAgg {
 		fmt.Printf("  Aggregator Submit: %v\n", agg.TotalAggregatorTime)
+		fmt.Printf("  Inclusion Proof Wait: %v\n", agg.TotalInclusionProofTime)
 	}
 	fmt.Printf("\nThroughput:\n")
 	fmt.Printf("  Average per thread: %.2f commits/sec\n", agg.AvgCommitsPerSec)

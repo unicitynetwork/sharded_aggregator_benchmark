@@ -163,7 +163,7 @@ Typical throughput:
 
 The threaded-aggregator benchmark can submit SMT root hashes to the Unicity aggregator service:
 
-- **Endpoint**: `https://goaggregator-test.unicity.network/api/v1/rpc`
+- **Endpoint**: `https://goggregator-test.unicity.network`
 - **Method**: `submit_commitment` (JSON-RPC 2.0)
 - **Request ID**: SHA256(publicKey || stateHash) where stateHash = SHA256(hostname-threadID-timestamp)
 - **Transaction Hash**: The SMT root hash of all commitments in the thread

@@ -67,6 +67,10 @@ make benchmark-threaded-nt N=1000 T=4   # 1000 commits per thread, 4 threads
 make benchmark-threaded-4            # 4 threads, 1000 commits each
 make benchmark-threaded-8            # 8 threads, 1000 commits each
 make benchmark-threaded-cpu          # Use all CPU cores
+
+# Aggregator submission benchmarks
+make benchmark-aggregator            # Default with aggregator submission
+make benchmark-aggregator-nt N=100 T=4  # 100 commits/thread, 4 threads, submit to aggregator
 ```
 
 #### Direct Execution
@@ -82,6 +86,10 @@ make benchmark-threaded-cpu          # Use all CPU cores
 ./bin/smt-benchmark-threaded 1000           # 1000 commits, 1 thread
 ./bin/smt-benchmark-threaded 1000 4         # 1000 commits per thread, 4 threads
 ./bin/smt-benchmark-threaded -n 1000 -t 8   # Using flags
+
+# Aggregator submission
+./bin/smt-benchmark-threaded-aggregator -s              # 1 commit, 1 thread, submit
+./bin/smt-benchmark-threaded-aggregator -n 100 -t 4 -s  # 100/thread, 4 threads, submit
 ```
 
 #### Using Docker
@@ -127,6 +135,14 @@ The project includes four benchmark implementations:
    - Provides per-thread and aggregated results
    - Ideal for testing scalability and multi-core performance
 
+5. **Threaded Benchmark with Aggregator** (`cmd/smt-benchmark/threaded-aggregator/main.go`)
+   - Extends threaded benchmark with Unicity aggregator integration
+   - Submits each thread's SMT root hash to the aggregator service
+   - Includes `aggregateRequestCount` field with commitment count
+   - Request ID derived from hostname, thread ID, and timestamp
+   - Transaction hash is the SMT root hash
+   - Full cryptographic authentication of submissions
+
 ## Performance Results
 
 Expected performance on modern hardware:
@@ -142,6 +158,23 @@ Typical throughput:
 - **SMT Building**: ~100,000-200,000 leaves/sec
 - **Root Calculation**: < 1 second for 100,000 leaves
 - **Memory Usage**: ~500-1000 MB for 100,000 commitments
+
+## Aggregator Integration
+
+The threaded-aggregator benchmark can submit SMT root hashes to the Unicity aggregator service:
+
+- **Endpoint**: `https://goaggregator-test.unicity.network/api/v1/rpc`
+- **Method**: `submit_commitment` (JSON-RPC 2.0)
+- **Request ID**: SHA256(publicKey || stateHash) where stateHash = SHA256(hostname-threadID-timestamp)
+- **Transaction Hash**: The SMT root hash of all commitments in the thread
+- **Additional Field**: `aggregateRequestCount` containing the number of commitments in the tree
+
+Each thread:
+1. Builds its own SMT with the specified number of commitments
+2. Calculates the root hash
+3. Creates a unique cryptographic identity
+4. Signs the root hash
+5. Submits to the aggregator with proper authentication
 
 ## Architecture
 
@@ -203,6 +236,21 @@ Examples:
   smt-benchmark-threaded 1000               # 1000 commitments, 1 thread
   smt-benchmark-threaded 1000 4             # 1000 commitments per thread, 4 threads
   smt-benchmark-threaded -n 1000 -t 8       # 1000 commitments per thread, 8 threads
+```
+
+### Threaded Benchmark with Aggregator
+```
+Usage: smt-benchmark-threaded-aggregator [options] [commitments_per_thread] [thread_count]
+
+Options:
+  -n, --count     Number of commitments per thread (default: 1)
+  -t, --threads   Number of threads (default: 1)
+  -s, --submit    Submit tree roots to Unicity aggregator
+
+Examples:
+  smt-benchmark-threaded-aggregator -s                    # Submit 1 root from 1 thread
+  smt-benchmark-threaded-aggregator 100 4 -s              # 100 commits/thread, 4 threads
+  smt-benchmark-threaded-aggregator -n 1000 -t 8 -s       # 1000/thread, 8 threads, submit
 ```
 
 ## Development

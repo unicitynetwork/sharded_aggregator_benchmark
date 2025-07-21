@@ -36,6 +36,9 @@ RUN echo '#!/bin/sh' > /app/run-benchmark.sh && \
     echo 'if [ "$1" = "threaded" ]; then' >> /app/run-benchmark.sh && \
     echo '  shift' >> /app/run-benchmark.sh && \
     echo '  exec /app/bin/smt-benchmark-threaded "$@"' >> /app/run-benchmark.sh && \
+    echo 'elif [ "$1" = "aggregator" ]; then' >> /app/run-benchmark.sh && \
+    echo '  shift' >> /app/run-benchmark.sh && \
+    echo '  exec /app/bin/smt-benchmark-threaded-aggregator "$@"' >> /app/run-benchmark.sh && \
     echo 'elif [ "$1" = "simple" ]; then' >> /app/run-benchmark.sh && \
     echo '  shift' >> /app/run-benchmark.sh && \
     echo '  exec /app/bin/smt-benchmark-simple "$@"' >> /app/run-benchmark.sh && \

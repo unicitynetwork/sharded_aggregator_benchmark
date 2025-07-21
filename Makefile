@@ -19,6 +19,7 @@ build: deps
 	@go build -o $(BUILD_DIR)/smt-benchmark-simple ./cmd/smt-benchmark/main.go
 	@go build -o $(BUILD_DIR)/smt-benchmark-standalone ./cmd/smt-benchmark/standalone/main.go
 	@go build -o $(BUILD_DIR)/smt-benchmark-threaded ./cmd/smt-benchmark/threaded/main.go
+	@go build -o $(BUILD_DIR)/smt-benchmark-threaded-aggregator ./cmd/smt-benchmark/threaded-aggregator/main.go
 	@echo "✓ Build complete"
 
 # Run simple benchmark
@@ -103,6 +104,19 @@ benchmark-threaded-8: build
 benchmark-threaded-cpu: build
 	@echo "Running threaded benchmark with CPU count threads..."
 	@./$(BUILD_DIR)/smt-benchmark-threaded -n 1000 -t $$(nproc)
+
+# Threaded benchmark with aggregator submission
+benchmark-aggregator: build
+	@echo "Running threaded benchmark with aggregator submission..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -s $(ARGS)
+
+benchmark-aggregator-nt: build
+	@if [ -z "$(N)" ] || [ -z "$(T)" ]; then \
+		echo "Error: Please specify N=<commitments> T=<threads> (e.g., make benchmark-aggregator-nt N=1000 T=4)"; \
+		exit 1; \
+	fi
+	@echo "Running aggregator benchmark with $(N) commitments on $(T) threads..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -n $(N) -t $(T) -s
 
 # Docker commands
 docker-build:

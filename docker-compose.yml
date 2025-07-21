@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  smt-benchmark:
+    build: .
+    container_name: smt-benchmark
+    # Default runs with 1 commitment, override with: docker-compose run smt-benchmark /app/bin/smt-benchmark-standalone 1000
+    command: /app/bin/smt-benchmark-standalone
+    environment:
+      - GOMAXPROCS=4  # Adjust based on your CPU cores
+      - NUM_COMMITMENTS=${NUM_COMMITMENTS:-1}  # Can be overridden with NUM_COMMITMENTS=1000 docker-compose up
+    volumes:
+      - ./results:/app/results  # Optional: for saving results
+    networks:
+      - benchmark-network
+
+  # Run different benchmark variants
+  smt-benchmark-simple:
+    build: .
+    container_name: smt-benchmark-simple
+    command: /app/bin/smt-benchmark-simple
+    environment:
+      - GOMAXPROCS=4
+      - NUM_COMMITMENTS=${NUM_COMMITMENTS:-1}
+    profiles:
+      - simple
+    networks:
+      - benchmark-network
+
+  # Benchmark with custom parameters
+  smt-benchmark-custom:
+    build: .
+    container_name: smt-benchmark-custom
+    command: ["/app/bin/smt-benchmark-standalone", "${NUM_COMMITMENTS:-1}"]
+    environment:
+      - GOMAXPROCS=4
+    profiles:
+      - custom
+    networks:
+      - benchmark-network
+
+networks:
+  benchmark-network:
+    driver: bridge

@@ -60,20 +60,28 @@ make benchmark-n N=100000
 make benchmark-10k    # 10,000 commitments
 make benchmark-100k   # 100,000 commitments
 make benchmark-1m     # 1,000,000 commitments
+
+# Threaded benchmarks
+make benchmark-threaded              # Default: 1 commitment, 1 thread
+make benchmark-threaded-nt N=1000 T=4   # 1000 commits per thread, 4 threads
+make benchmark-threaded-4            # 4 threads, 1000 commits each
+make benchmark-threaded-8            # 8 threads, 1000 commits each
+make benchmark-threaded-cpu          # Use all CPU cores
 ```
 
 #### Direct Execution
 
 ```bash
-# Default (1 commitment)
-./bin/smt-benchmark-standalone
+# Standalone benchmark
+./bin/smt-benchmark-standalone              # 1 commitment
+./bin/smt-benchmark-standalone 1000         # 1000 commitments
+./bin/smt-benchmark-standalone -n 1000      # Using flag
 
-# With positional argument
-./bin/smt-benchmark-standalone 1000
-
-# With named flag
-./bin/smt-benchmark-standalone -n 1000
-./bin/smt-benchmark-standalone --count 1000
+# Threaded benchmark
+./bin/smt-benchmark-threaded                # 1 commitment, 1 thread
+./bin/smt-benchmark-threaded 1000           # 1000 commits, 1 thread
+./bin/smt-benchmark-threaded 1000 4         # 1000 commits per thread, 4 threads
+./bin/smt-benchmark-threaded -n 1000 -t 8   # Using flags
 ```
 
 #### Using Docker
@@ -86,18 +94,20 @@ make docker-run
 make docker-benchmark-n N=1000
 
 # Using docker directly
-docker run --rm smt-benchmark 1000
+docker run --rm smt-benchmark 1000                    # Standalone
+docker run --rm smt-benchmark threaded 1000 4         # Threaded
 
 # Using docker-compose with environment variable
 NUM_COMMITMENTS=1000 docker-compose up
 
 # Using docker-compose run
 docker-compose run smt-benchmark /app/bin/smt-benchmark-standalone 1000
+docker-compose run smt-benchmark /app/bin/smt-benchmark-threaded 1000 4
 ```
 
 ## Benchmark Programs
 
-The project includes three benchmark implementations:
+The project includes four benchmark implementations:
 
 1. **Simple Benchmark** (`cmd/smt-benchmark/main.go`)
    - Basic implementation with simplified SMT
@@ -110,6 +120,12 @@ The project includes three benchmark implementations:
 3. **Advanced Benchmark** (`cmd/smt-benchmark/advanced/main.go`)
    - Uses the reference implementation's packages
    - Most accurate but requires the aggregator-go dependencies
+
+4. **Threaded Benchmark** (`cmd/smt-benchmark/threaded/main.go`)
+   - Multi-threaded implementation with separate SMT per thread
+   - Supports parallel execution on multiple CPU cores
+   - Provides per-thread and aggregated results
+   - Ideal for testing scalability and multi-core performance
 
 ## Performance Results
 
@@ -161,8 +177,7 @@ SMT paths are derived from request IDs by prefixing with "01" to preserve leadin
 
 ## Command Line Usage
 
-The benchmark programs accept the number of commitments in multiple ways:
-
+### Standalone Benchmark
 ```
 Usage: smt-benchmark-standalone [options] [number_of_commitments]
 
@@ -173,7 +188,21 @@ Examples:
   smt-benchmark-standalone              # Run with 1 commitment
   smt-benchmark-standalone 1000         # Run with 1000 commitments
   smt-benchmark-standalone -n 5000      # Run with 5000 commitments
-  smt-benchmark-standalone --count 100  # Run with 100 commitments
+```
+
+### Threaded Benchmark
+```
+Usage: smt-benchmark-threaded [options] [commitments_per_thread] [thread_count]
+
+Options:
+  -n, --count     Number of commitments per thread (default: 1)
+  -t, --threads   Number of threads (default: 1)
+
+Examples:
+  smt-benchmark-threaded                    # 1 commitment, 1 thread
+  smt-benchmark-threaded 1000               # 1000 commitments, 1 thread
+  smt-benchmark-threaded 1000 4             # 1000 commitments per thread, 4 threads
+  smt-benchmark-threaded -n 1000 -t 8       # 1000 commitments per thread, 8 threads
 ```
 
 ## Development

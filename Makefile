@@ -18,6 +18,7 @@ build: deps
 	@mkdir -p $(BUILD_DIR)
 	@go build -o $(BUILD_DIR)/smt-benchmark-simple ./cmd/smt-benchmark/main.go
 	@go build -o $(BUILD_DIR)/smt-benchmark-standalone ./cmd/smt-benchmark/standalone/main.go
+	@go build -o $(BUILD_DIR)/smt-benchmark-threaded ./cmd/smt-benchmark/threaded/main.go
 	@echo "✓ Build complete"
 
 # Run simple benchmark
@@ -47,6 +48,20 @@ benchmark-n: build
 	@echo "Running benchmark with $(N) commitments..."
 	@./$(BUILD_DIR)/smt-benchmark-standalone $(N)
 
+# Run threaded benchmark
+benchmark-threaded: build
+	@echo "Running threaded SMT benchmark..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded $(ARGS)
+
+# Run threaded benchmark with custom parameters
+benchmark-threaded-nt: build
+	@if [ -z "$(N)" ] || [ -z "$(T)" ]; then \
+		echo "Error: Please specify N=<commitments> T=<threads> (e.g., make benchmark-threaded-nt N=1000 T=4)"; \
+		exit 1; \
+	fi
+	@echo "Running threaded benchmark with $(N) commitments on $(T) threads..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded -n $(N) -t $(T)
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
@@ -75,6 +90,19 @@ benchmark-100k: build
 benchmark-1m: build
 	@echo "Running benchmark with 1,000,000 commitments..."
 	@./$(BUILD_DIR)/smt-benchmark-standalone 1000000
+
+# Threaded benchmark presets
+benchmark-threaded-4: build
+	@echo "Running threaded benchmark with 4 threads (1000 commits each)..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded 1000 4
+
+benchmark-threaded-8: build
+	@echo "Running threaded benchmark with 8 threads (1000 commits each)..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded 1000 8
+
+benchmark-threaded-cpu: build
+	@echo "Running threaded benchmark with CPU count threads..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded -n 1000 -t $$(nproc)
 
 # Docker commands
 docker-build:

@@ -139,6 +139,28 @@ benchmark-duration-aggregator: build
 	@echo "Running duration benchmark for $(D) with $(T) threads and aggregator submission..."
 	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -d $(D) -t $(T) -s
 
+# Rounds-based benchmarks
+benchmark-rounds: build
+	@if [ -z "$(R)" ]; then \
+		echo "Error: Please specify R=<rounds> (e.g., make benchmark-rounds R=10)"; \
+		exit 1; \
+	fi
+	@echo "Running benchmark with $(R) rounds..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -r $(R) $(ARGS)
+
+benchmark-rounds-aggregator: build
+	@if [ -z "$(N)" ] || [ -z "$(T)" ] || [ -z "$(R)" ]; then \
+		echo "Error: Please specify N=<commits> T=<threads> R=<rounds> (e.g., make benchmark-rounds-aggregator N=1000 T=4 R=10)"; \
+		exit 1; \
+	fi
+	@echo "Running $(R) rounds with $(N) commits on $(T) threads with aggregator submission..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -n $(N) -t $(T) -r $(R) -s
+
+# Sustained load test - 10 rounds, 1000 commits each, 4 threads
+benchmark-sustained: build
+	@echo "Running sustained load test (10 rounds, 1000 commits/round, 4 threads)..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -n 1000 -t 4 -r 10 -s
+
 # Docker commands
 docker-build:
 	@echo "Building Docker image..."

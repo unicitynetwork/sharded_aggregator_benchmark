@@ -76,6 +76,11 @@ make benchmark-aggregator-nt N=100 T=4  # 100 commits/thread, 4 threads, submit 
 make benchmark-duration D=1s         # Run for 1 second
 make benchmark-duration-1s           # Run for 1 second with 4 threads
 make benchmark-duration-aggregator D=1s T=8  # Run for 1s, 8 threads, submit to aggregator
+
+# Rounds-based benchmarks
+make benchmark-rounds R=10           # Run 10 rounds
+make benchmark-rounds-aggregator N=1000 T=4 R=10  # 10 rounds, 1000 commits/round, 4 threads
+make benchmark-sustained             # Sustained load test (10 rounds, 1000 commits, 4 threads)
 ```
 
 #### Direct Execution
@@ -248,18 +253,27 @@ Examples:
 Usage: smt-benchmark-threaded-aggregator [options] [commitments_per_thread] [thread_count]
 
 Options:
-  -n, --count     Number of commitments per thread (default: 1)
+  -n, --count     Number of commitments per round (default: 1)
   -t, --threads   Number of threads (default: 1)
-  -d, --duration  Duration to run (e.g., 1s, 500ms). Overrides -n
+  -r, --rounds    Number of rounds per thread (default: 1)
+  -d, --duration  Duration per round (e.g., 1s, 500ms). Overrides -n
   -s, --submit    Submit tree roots to Unicity aggregator
 
 Examples:
-  smt-benchmark-threaded-aggregator -s                    # Submit 1 root from 1 thread
-  smt-benchmark-threaded-aggregator 100 4 -s              # 100 commits/thread, 4 threads
-  smt-benchmark-threaded-aggregator -n 1000 -t 8 -s       # 1000/thread, 8 threads, submit
-  smt-benchmark-threaded-aggregator -d 1s -t 4 -s         # Run for 1 second, 4 threads, submit
-  smt-benchmark-threaded-aggregator -d 500ms -t 8         # Run for 500ms, 8 threads
+  smt-benchmark-threaded-aggregator -s                      # Submit 1 root from 1 thread, 1 round
+  smt-benchmark-threaded-aggregator 100 4 -s                # 100 commits/round, 4 threads, 1 round
+  smt-benchmark-threaded-aggregator -n 1000 -t 8 -r 10 -s   # 1000/round, 8 threads, 10 rounds
+  smt-benchmark-threaded-aggregator -d 1s -t 4 -r 5 -s      # 5 rounds of 1s each, 4 threads (5s total)
+  smt-benchmark-threaded-aggregator -d 500ms -t 8 -r 3      # 3 rounds of 500ms each, 8 threads (1.5s total)
 ```
+
+With the rounds feature, each thread:
+1. Generates and builds a tree for one round
+2. Optionally submits the root hash to the aggregator
+3. Clears the tree from memory (garbage collection)
+4. Repeats for the specified number of rounds
+
+This allows for sustained load testing and memory efficiency verification.
 
 ## Development
 

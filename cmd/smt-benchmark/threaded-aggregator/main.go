@@ -87,9 +87,9 @@ type ProofStep struct {
 	Sibling interface{} `json:"sibling"`
 }
 
-// ThreadResult holds the benchmark results for a single thread
-type ThreadResult struct {
-	ThreadID               int
+// RoundResult holds the results for a single round
+type RoundResult struct {
+	RoundNum               int
 	NumCommitments         int
 	GenerationTime         time.Duration
 	SMTBuildTime           time.Duration
@@ -101,6 +101,20 @@ type ThreadResult struct {
 	SubmittedRequestID     string
 	AggregatorResponse     string
 	InclusionProof         *InclusionProof
+}
+
+// ThreadResult holds the benchmark results for a single thread
+type ThreadResult struct {
+	ThreadID               int
+	NumRounds              int
+	TotalCommitments       int
+	TotalGenerationTime    time.Duration
+	TotalSMTBuildTime      time.Duration
+	TotalRootCalcTime      time.Duration
+	TotalAggregatorTime    time.Duration
+	TotalInclusionProofTime time.Duration
+	TotalTime              time.Duration
+	RoundResults           []RoundResult
 	Error                  error
 }
 
@@ -611,26 +625,15 @@ func waitForInclusionProof(requestID string, threadID int, maxWaitTime time.Dura
 	return nil, maxWaitTime, fmt.Errorf("timeout waiting for inclusion proof after %v", maxWaitTime)
 }
 
-// runThreadBenchmarkDuration runs the benchmark for a specified duration
-func runThreadBenchmarkDuration(threadID int, duration time.Duration, submitToAgg bool, wg *sync.WaitGroup, results chan<- ThreadResult) {
-	defer wg.Done()
-	
-	result := ThreadResult{
-		ThreadID: threadID,
+// runSingleRoundDuration executes one round of tree generation for a specified duration
+func runSingleRoundDuration(threadID, roundNum int, endTime time.Time, submitToAgg bool, aggregatorPrivKey *btcec.PrivateKey) (RoundResult, error) {
+	round := RoundResult{
+		RoundNum: roundNum,
 	}
 	
 	startTotal := time.Now()
-	endTime := startTotal.Add(duration)
 	
-	// Generate a key pair for aggregator submission
-	aggregatorPrivKey, err := btcec.NewPrivateKey()
-	if err != nil {
-		result.Error = fmt.Errorf("thread %d: failed to generate aggregator key: %w", threadID, err)
-		results <- result
-		return
-	}
-	
-	// Phase 1: Generate commitments for the duration
+	// Phase 1: Generate commitments for the remaining duration
 	startGen := time.Now()
 	
 	var commitments []*Commitment
@@ -639,16 +642,12 @@ func runThreadBenchmarkDuration(threadID int, duration time.Duration, submitToAg
 	for time.Now().Before(endTime) {
 		commitment, err := generateValidCommitment(threadID, len(commitments))
 		if err != nil {
-			result.Error = fmt.Errorf("thread %d: failed to generate commitment %d: %w", threadID, len(commitments), err)
-			results <- result
-			return
+			return round, fmt.Errorf("failed to generate commitment %d: %w", len(commitments), err)
 		}
 		
 		leafValue, err := calculateLeafValue(commitment)
 		if err != nil {
-			result.Error = fmt.Errorf("thread %d: failed to calculate leaf value %d: %w", threadID, len(commitments), err)
-			results <- result
-			return
+			return round, fmt.Errorf("failed to calculate leaf value %d: %w", len(commitments), err)
 		}
 		
 		commitments = append(commitments, commitment)
@@ -656,65 +655,126 @@ func runThreadBenchmarkDuration(threadID int, duration time.Duration, submitToAg
 		leafValues[path] = leafValue
 	}
 	
-	result.NumCommitments = len(commitments)
-	result.GenerationTime = time.Since(startGen)
+	round.NumCommitments = len(commitments)
+	round.GenerationTime = time.Since(startGen)
 	
 	// If no commitments were generated, return early
-	if result.NumCommitments == 0 {
-		result.Error = fmt.Errorf("thread %d: no commitments generated in %v", threadID, duration)
-		results <- result
-		return
+	if round.NumCommitments == 0 {
+		return round, fmt.Errorf("no commitments generated in remaining time")
 	}
 	
+	// Rest is the same as runSingleRound
 	// Phase 2: Build Sparse Merkle Tree
 	smt := NewSparseMerkleTree()
 	
 	startSMT := time.Now()
 	
-	// Add leaves to SMT
 	for path, value := range leafValues {
 		smt.AddLeaf(path, value)
 	}
 	
-	// Build the tree structure
 	smt.BuildTree()
 	
-	result.SMTBuildTime = time.Since(startSMT)
+	round.SMTBuildTime = time.Since(startSMT)
 	
 	// Phase 3: Calculate root hash
 	startRoot := time.Now()
 	
 	root := smt.CalculateRoot()
 	
-	result.RootCalculationTime = time.Since(startRoot)
-	result.RootHash = sha256Prefix + hex.EncodeToString(root)
+	round.RootCalculationTime = time.Since(startRoot)
+	round.RootHash = sha256Prefix + hex.EncodeToString(root)
 	
 	// Phase 4: Submit to aggregator (if enabled)
 	if submitToAgg {
 		startAgg := time.Now()
 		
 		hostID := getHostID()
-		response, requestID, err := submitToAggregator(hostID, threadID, root, result.NumCommitments, aggregatorPrivKey)
+		response, requestID, err := submitToAggregator(hostID, threadID, root, round.NumCommitments, aggregatorPrivKey)
 		if err != nil {
-			result.AggregatorResponse = fmt.Sprintf("Submit Error: %v", err)
-			result.AggregatorSubmitTime = time.Since(startAgg)
+			round.AggregatorResponse = fmt.Sprintf("Submit Error: %v", err)
+			round.AggregatorSubmitTime = time.Since(startAgg)
 		} else {
-			result.AggregatorResponse = "Submit Success: " + response
-			result.SubmittedRequestID = requestID
-			result.AggregatorSubmitTime = time.Since(startAgg)
+			round.AggregatorResponse = "Submit Success: " + response
+			round.SubmittedRequestID = requestID
+			round.AggregatorSubmitTime = time.Since(startAgg)
 			
 			// Phase 5: Wait for inclusion proof
-			fmt.Printf("Thread %d: Waiting for inclusion proof for request %s...\n", threadID, requestID[:16]+"...")
+			fmt.Printf("Thread %d Round %d: Waiting for inclusion proof for request %s...\n", threadID, roundNum, requestID[:16]+"...")
 			
 			proof, waitTime, err := waitForInclusionProof(requestID, threadID, 30*time.Second)
 			if err != nil {
-				fmt.Printf("Thread %d: Failed to get inclusion proof: %v\n", threadID, err)
-				result.AggregatorResponse += fmt.Sprintf(" | Proof Error: %v", err)
+				fmt.Printf("Thread %d Round %d: Failed to get inclusion proof: %v\n", threadID, roundNum, err)
+				round.AggregatorResponse += fmt.Sprintf(" | Proof Error: %v", err)
 			} else {
-				result.InclusionProof = proof
-				result.InclusionProofWaitTime = waitTime
-				fmt.Printf("Thread %d: Got inclusion proof after %v\n", threadID, waitTime)
+				round.InclusionProof = proof
+				round.InclusionProofWaitTime = waitTime
+				fmt.Printf("Thread %d Round %d: Got inclusion proof after %v\n", threadID, roundNum, waitTime)
 			}
+		}
+	}
+	
+	round.TotalTime = time.Since(startTotal)
+	
+	// Clear memory
+	commitments = nil
+	leafValues = nil
+	smt = nil
+	runtime.GC()
+	
+	return round, nil
+}
+
+// runThreadBenchmarkDuration runs the benchmark for a specified duration per round
+func runThreadBenchmarkDuration(threadID int, duration time.Duration, numRounds int, submitToAgg bool, wg *sync.WaitGroup, results chan<- ThreadResult) {
+	defer wg.Done()
+	
+	result := ThreadResult{
+		ThreadID:  threadID,
+		NumRounds: numRounds,
+	}
+	
+	startTotal := time.Now()
+	
+	// Generate a key pair for aggregator submission (reused across rounds)
+	aggregatorPrivKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		result.Error = fmt.Errorf("thread %d: failed to generate aggregator key: %w", threadID, err)
+		results <- result
+		return
+	}
+	
+	// Run multiple rounds, each with the specified duration
+	for roundNum := 1; roundNum <= numRounds; roundNum++ {
+		roundStartTime := time.Now()
+		roundEndTime := roundStartTime.Add(duration)
+		
+		fmt.Printf("Thread %d: Starting round %d/%d (duration mode, %v per round)\n", threadID, roundNum, numRounds, duration)
+		
+		round, err := runSingleRoundDuration(threadID, roundNum, roundEndTime, submitToAgg, aggregatorPrivKey)
+		if err != nil {
+			// If no commitments generated, that's an error
+			result.Error = fmt.Errorf("thread %d round %d: %w", threadID, roundNum, err)
+			results <- result
+			return
+		}
+		
+		// Accumulate results
+		result.RoundResults = append(result.RoundResults, round)
+		result.TotalCommitments += round.NumCommitments
+		result.TotalGenerationTime += round.GenerationTime
+		result.TotalSMTBuildTime += round.SMTBuildTime
+		result.TotalRootCalcTime += round.RootCalculationTime
+		result.TotalAggregatorTime += round.AggregatorSubmitTime
+		result.TotalInclusionProofTime += round.InclusionProofWaitTime
+		
+		fmt.Printf("Thread %d: Completed round %d/%d - %d commits in %v (%.2f commits/sec)\n",
+			threadID, roundNum, numRounds, round.NumCommitments, round.TotalTime,
+			float64(round.NumCommitments)/round.TotalTime.Seconds())
+		
+		// Small delay between rounds to avoid overwhelming the aggregator
+		if roundNum < numRounds && submitToAgg {
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 	
@@ -723,24 +783,13 @@ func runThreadBenchmarkDuration(threadID int, duration time.Duration, submitToAg
 	results <- result
 }
 
-// runThreadBenchmark runs the benchmark for a single thread
-func runThreadBenchmark(threadID, numCommitments int, submitToAgg bool, wg *sync.WaitGroup, results chan<- ThreadResult) {
-	defer wg.Done()
-	
-	result := ThreadResult{
-		ThreadID:       threadID,
-		NumCommitments: numCommitments,
+// runSingleRound executes one round of tree generation and submission
+func runSingleRound(threadID, roundNum, numCommitments int, submitToAgg bool, aggregatorPrivKey *btcec.PrivateKey) (RoundResult, error) {
+	round := RoundResult{
+		RoundNum: roundNum,
 	}
 	
 	startTotal := time.Now()
-	
-	// Generate a key pair for aggregator submission
-	aggregatorPrivKey, err := btcec.NewPrivateKey()
-	if err != nil {
-		result.Error = fmt.Errorf("thread %d: failed to generate aggregator key: %w", threadID, err)
-		results <- result
-		return
-	}
 	
 	// Phase 1: Generate commitments
 	startGen := time.Now()
@@ -751,16 +800,12 @@ func runThreadBenchmark(threadID, numCommitments int, submitToAgg bool, wg *sync
 	for i := 0; i < numCommitments; i++ {
 		commitment, err := generateValidCommitment(threadID, i)
 		if err != nil {
-			result.Error = fmt.Errorf("thread %d: failed to generate commitment %d: %w", threadID, i, err)
-			results <- result
-			return
+			return round, fmt.Errorf("failed to generate commitment %d: %w", i, err)
 		}
 		
 		leafValue, err := calculateLeafValue(commitment)
 		if err != nil {
-			result.Error = fmt.Errorf("thread %d: failed to calculate leaf value %d: %w", threadID, i, err)
-			results <- result
-			return
+			return round, fmt.Errorf("failed to calculate leaf value %d: %w", i, err)
 		}
 		
 		commitments[i] = commitment
@@ -768,7 +813,8 @@ func runThreadBenchmark(threadID, numCommitments int, submitToAgg bool, wg *sync
 		leafValues[path] = leafValue
 	}
 	
-	result.GenerationTime = time.Since(startGen)
+	round.NumCommitments = numCommitments
+	round.GenerationTime = time.Since(startGen)
 	
 	// Phase 2: Build Sparse Merkle Tree
 	smt := NewSparseMerkleTree()
@@ -783,15 +829,15 @@ func runThreadBenchmark(threadID, numCommitments int, submitToAgg bool, wg *sync
 	// Build the tree structure
 	smt.BuildTree()
 	
-	result.SMTBuildTime = time.Since(startSMT)
+	round.SMTBuildTime = time.Since(startSMT)
 	
 	// Phase 3: Calculate root hash
 	startRoot := time.Now()
 	
 	root := smt.CalculateRoot()
 	
-	result.RootCalculationTime = time.Since(startRoot)
-	result.RootHash = sha256Prefix + hex.EncodeToString(root)
+	round.RootCalculationTime = time.Since(startRoot)
+	round.RootHash = sha256Prefix + hex.EncodeToString(root)
 	
 	// Phase 4: Submit to aggregator (if enabled)
 	if submitToAgg {
@@ -800,31 +846,85 @@ func runThreadBenchmark(threadID, numCommitments int, submitToAgg bool, wg *sync
 		hostID := getHostID()
 		response, requestID, err := submitToAggregator(hostID, threadID, root, numCommitments, aggregatorPrivKey)
 		if err != nil {
-			result.AggregatorResponse = fmt.Sprintf("Submit Error: %v", err)
-			result.AggregatorSubmitTime = time.Since(startAgg)
+			round.AggregatorResponse = fmt.Sprintf("Submit Error: %v", err)
+			round.AggregatorSubmitTime = time.Since(startAgg)
 		} else {
-			result.AggregatorResponse = "Submit Success: " + response
-			result.SubmittedRequestID = requestID
-			result.AggregatorSubmitTime = time.Since(startAgg)
+			round.AggregatorResponse = "Submit Success: " + response
+			round.SubmittedRequestID = requestID
+			round.AggregatorSubmitTime = time.Since(startAgg)
 			
 			// Phase 5: Wait for inclusion proof
-			fmt.Printf("Thread %d: Waiting for inclusion proof for request %s...\n", threadID, requestID[:16]+"...")
-			fmt.Printf("Thread %d: Debug - Full Request ID: %s\n", threadID, requestID)
-			fmt.Printf("Thread %d: Debug - Root Hash (Transaction): %s\n", threadID, result.RootHash)
+			fmt.Printf("Thread %d Round %d: Waiting for inclusion proof for request %s...\n", threadID, roundNum, requestID[:16]+"...")
 			
 			proof, waitTime, err := waitForInclusionProof(requestID, threadID, 30*time.Second)
 			if err != nil {
-				fmt.Printf("Thread %d: Failed to get inclusion proof: %v\n", threadID, err)
-				result.AggregatorResponse += fmt.Sprintf(" | Proof Error: %v", err)
+				fmt.Printf("Thread %d Round %d: Failed to get inclusion proof: %v\n", threadID, roundNum, err)
+				round.AggregatorResponse += fmt.Sprintf(" | Proof Error: %v", err)
 			} else {
-				result.InclusionProof = proof
-				result.InclusionProofWaitTime = waitTime
-				fmt.Printf("Thread %d: Got inclusion proof after %v\n", threadID, waitTime)
-				// Debug: print what we got back
-				if proof.TransactionHash != "" {
-					fmt.Printf("Thread %d: Debug - Proof Transaction Hash: %s\n", threadID, proof.TransactionHash)
-				}
+				round.InclusionProof = proof
+				round.InclusionProofWaitTime = waitTime
+				fmt.Printf("Thread %d Round %d: Got inclusion proof after %v\n", threadID, roundNum, waitTime)
 			}
+		}
+	}
+	
+	round.TotalTime = time.Since(startTotal)
+	
+	// Clear memory - the tree will be garbage collected
+	commitments = nil
+	leafValues = nil
+	smt = nil
+	runtime.GC() // Force garbage collection to free memory
+	
+	return round, nil
+}
+
+// runThreadBenchmark runs the benchmark for a single thread
+func runThreadBenchmark(threadID, numCommitments, numRounds int, submitToAgg bool, wg *sync.WaitGroup, results chan<- ThreadResult) {
+	defer wg.Done()
+	
+	result := ThreadResult{
+		ThreadID:  threadID,
+		NumRounds: numRounds,
+	}
+	
+	startTotal := time.Now()
+	
+	// Generate a key pair for aggregator submission (reused across rounds)
+	aggregatorPrivKey, err := btcec.NewPrivateKey()
+	if err != nil {
+		result.Error = fmt.Errorf("thread %d: failed to generate aggregator key: %w", threadID, err)
+		results <- result
+		return
+	}
+	
+	// Run multiple rounds
+	for roundNum := 1; roundNum <= numRounds; roundNum++ {
+		fmt.Printf("Thread %d: Starting round %d/%d\n", threadID, roundNum, numRounds)
+		
+		round, err := runSingleRound(threadID, roundNum, numCommitments, submitToAgg, aggregatorPrivKey)
+		if err != nil {
+			result.Error = fmt.Errorf("thread %d round %d: %w", threadID, roundNum, err)
+			results <- result
+			return
+		}
+		
+		// Accumulate results
+		result.RoundResults = append(result.RoundResults, round)
+		result.TotalCommitments += round.NumCommitments
+		result.TotalGenerationTime += round.GenerationTime
+		result.TotalSMTBuildTime += round.SMTBuildTime
+		result.TotalRootCalcTime += round.RootCalculationTime
+		result.TotalAggregatorTime += round.AggregatorSubmitTime
+		result.TotalInclusionProofTime += round.InclusionProofWaitTime
+		
+		fmt.Printf("Thread %d: Completed round %d/%d - %d commits in %v (%.2f commits/sec)\n",
+			threadID, roundNum, numRounds, round.NumCommitments, round.TotalTime,
+			float64(round.NumCommitments)/round.TotalTime.Seconds())
+		
+		// Small delay between rounds to avoid overwhelming the aggregator
+		if roundNum < numRounds && submitToAgg {
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 	
@@ -833,8 +933,8 @@ func runThreadBenchmark(threadID, numCommitments int, submitToAgg bool, wg *sync
 	results <- result
 }
 
-func parseArgs() (int, int, bool, time.Duration) {
-	var numCommitments, numThreads int
+func parseArgs() (int, int, bool, time.Duration, int) {
+	var numCommitments, numThreads, numRounds int
 	var submitToAgg bool
 	var duration time.Duration
 	
@@ -843,6 +943,8 @@ func parseArgs() (int, int, bool, time.Duration) {
 	flag.IntVar(&numCommitments, "count", defaultCommitments, "Number of commitments to generate per thread")
 	flag.IntVar(&numThreads, "t", defaultThreads, "Number of threads to run")
 	flag.IntVar(&numThreads, "threads", defaultThreads, "Number of threads to run")
+	flag.IntVar(&numRounds, "r", 1, "Number of rounds (tree generation + submission cycles) per thread")
+	flag.IntVar(&numRounds, "rounds", 1, "Number of rounds (tree generation + submission cycles) per thread")
 	flag.BoolVar(&submitToAgg, "submit", false, "Submit tree roots to Unicity aggregator")
 	flag.BoolVar(&submitToAgg, "s", false, "Submit tree roots to Unicity aggregator (short)")
 	flag.DurationVar(&duration, "d", 0, "Duration to run (e.g., 1s, 500ms). If set, generates as many commitments as possible in the given time")
@@ -882,28 +984,34 @@ func parseArgs() (int, int, bool, time.Duration) {
 		os.Exit(1)
 	}
 	
+	if numRounds <= 0 {
+		fmt.Fprintf(os.Stderr, "Error: Number of rounds must be positive\n")
+		os.Exit(1)
+	}
+	
 	// Set thread count to CPU count if requested
 	if numThreads > runtime.NumCPU() {
 		fmt.Printf("Warning: Thread count (%d) exceeds CPU count (%d)\n", numThreads, runtime.NumCPU())
 	}
 	
-	return numCommitments, numThreads, submitToAgg, duration
+	return numCommitments, numThreads, submitToAgg, duration, numRounds
 }
 
 func printUsage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s [options] [commitments_per_thread] [thread_count]\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "\nOptions:\n")
-	fmt.Fprintf(os.Stderr, "  -n, --count     Number of commitments per thread (default: %d)\n", defaultCommitments)
+	fmt.Fprintf(os.Stderr, "  -n, --count     Number of commitments per round (default: %d)\n", defaultCommitments)
 	fmt.Fprintf(os.Stderr, "  -t, --threads   Number of threads (default: %d)\n", defaultThreads)
-	fmt.Fprintf(os.Stderr, "  -d, --duration  Duration to run (e.g., 1s, 500ms). Overrides -n\n")
+	fmt.Fprintf(os.Stderr, "  -r, --rounds    Number of rounds per thread (default: 1)\n")
+	fmt.Fprintf(os.Stderr, "  -d, --duration  Duration per round (e.g., 1s, 500ms). Overrides -n\n")
 	fmt.Fprintf(os.Stderr, "  -s, --submit    Submit tree roots to Unicity aggregator\n")
 	fmt.Fprintf(os.Stderr, "\nExamples:\n")
-	fmt.Fprintf(os.Stderr, "  %s                       # 1 commitment, 1 thread\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s 1000                  # 1000 commitments, 1 thread\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s 1000 4                # 1000 commitments per thread, 4 threads\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s -n 1000 -t 8 -s       # 1000 per thread, 8 threads, submit to aggregator\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s -d 1s -t 4 -s         # Run for 1 second, 4 threads, submit to aggregator\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s -d 500ms -t 8         # Run for 500ms, 8 threads\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s                         # 1 commitment, 1 thread, 1 round\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s 1000                    # 1000 commitments, 1 thread, 1 round\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s 1000 4                  # 1000 commitments per round, 4 threads, 1 round\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s -n 1000 -t 8 -r 10 -s   # 1000 per round, 8 threads, 10 rounds, submit\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s -d 1s -t 4 -r 5 -s      # 5 rounds of 1s each, 4 threads (5s total)\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s -d 500ms -t 8 -r 3      # 3 rounds of 500ms each, 8 threads (1.5s total)\n", os.Args[0])
 }
 
 func printMemStats(phase string) {
@@ -924,13 +1032,13 @@ func aggregateResults(results []ThreadResult, wallClockTime time.Duration) Aggre
 	
 	for _, r := range results {
 		if r.Error == nil {
-			agg.TotalCommitments += r.NumCommitments
+			agg.TotalCommitments += r.TotalCommitments
 			agg.TotalThreads++
-			agg.TotalGenerationTime += r.GenerationTime
-			agg.TotalSMTBuildTime += r.SMTBuildTime
-			agg.TotalRootCalcTime += r.RootCalculationTime
-			agg.TotalAggregatorTime += r.AggregatorSubmitTime
-			agg.TotalInclusionProofTime += r.InclusionProofWaitTime
+			agg.TotalGenerationTime += r.TotalGenerationTime
+			agg.TotalSMTBuildTime += r.TotalSMTBuildTime
+			agg.TotalRootCalcTime += r.TotalRootCalcTime
+			agg.TotalAggregatorTime += r.TotalAggregatorTime
+			agg.TotalInclusionProofTime += r.TotalInclusionProofTime
 		}
 	}
 	
@@ -946,7 +1054,7 @@ func aggregateResults(results []ThreadResult, wallClockTime time.Duration) Aggre
 
 func main() {
 	// Parse command line arguments
-	numCommitments, numThreads, submitToAgg, duration := parseArgs()
+	numCommitments, numThreads, submitToAgg, duration, numRounds := parseArgs()
 	
 	// Set GOMAXPROCS to use all available CPUs
 	runtime.GOMAXPROCS(runtime.NumCPU())
@@ -960,12 +1068,15 @@ func main() {
 	fmt.Printf("Multi-threaded SMT Benchmark with Aggregator Integration\n")
 	fmt.Printf("========================================================\n")
 	fmt.Printf("Threads: %d\n", numThreads)
+	fmt.Printf("Rounds per thread: %d\n", numRounds)
 	if isDurationMode {
-		fmt.Printf("Mode: Duration-based (run for %v)\n", duration)
+		fmt.Printf("Mode: Duration-based (%v per round)\n", duration)
+		fmt.Printf("Total duration: %v (%d rounds × %v)\n", duration*time.Duration(numRounds), numRounds, duration)
 	} else {
 		fmt.Printf("Mode: Count-based\n")
-		fmt.Printf("Commitments per thread: %d\n", numCommitments)
-		fmt.Printf("Total commitments: %d\n", numCommitments*numThreads)
+		fmt.Printf("Commitments per round: %d\n", numCommitments)
+		fmt.Printf("Total commitments per thread: %d\n", numCommitments*numRounds)
+		fmt.Printf("Total commitments (all threads): %d\n", numCommitments*numRounds*numThreads)
 	}
 	fmt.Printf("CPU cores available: %d\n", runtime.NumCPU())
 	fmt.Printf("Submit to aggregator: %v\n", submitToAgg)
@@ -987,9 +1098,9 @@ func main() {
 	for i := 0; i < numThreads; i++ {
 		wg.Add(1)
 		if isDurationMode {
-			go runThreadBenchmarkDuration(i, duration, submitToAgg, &wg, results)
+			go runThreadBenchmarkDuration(i, duration, numRounds, submitToAgg, &wg, results)
 		} else {
-			go runThreadBenchmark(i, numCommitments, submitToAgg, &wg, results)
+			go runThreadBenchmark(i, numCommitments, numRounds, submitToAgg, &wg, results)
 		}
 	}
 	
@@ -1010,12 +1121,10 @@ func main() {
 		if result.Error != nil {
 			fmt.Printf("Thread %d failed: %v\n", result.ThreadID, result.Error)
 		} else {
-			fmt.Printf("Thread %d completed: %d commits in %v (%.2f commits/sec)\n",
-				result.ThreadID, result.NumCommitments, result.TotalTime,
-				float64(result.NumCommitments)/result.TotalTime.Seconds())
-			if submitToAgg && result.AggregatorResponse != "" {
-				fmt.Printf("  Aggregator: %s\n", result.AggregatorResponse)
-			}
+			completedRounds := len(result.RoundResults)
+			fmt.Printf("Thread %d completed: %d rounds, %d total commits in %v (%.2f commits/sec)\n",
+				result.ThreadID, completedRounds, result.TotalCommitments, result.TotalTime,
+				float64(result.TotalCommitments)/result.TotalTime.Seconds())
 		}
 	}
 	
@@ -1033,24 +1142,30 @@ func main() {
 	for _, r := range threadResults {
 		if r.Error == nil {
 			fmt.Printf("Thread %d:\n", r.ThreadID)
-			fmt.Printf("  Commitments: %d\n", r.NumCommitments)
-			fmt.Printf("  Generation: %v (%.2f commits/sec)\n", 
-				r.GenerationTime, float64(r.NumCommitments)/r.GenerationTime.Seconds())
-			fmt.Printf("  SMT Build: %v (%.2f leaves/sec)\n", 
-				r.SMTBuildTime, float64(r.NumCommitments)/r.SMTBuildTime.Seconds())
-			fmt.Printf("  Root Calc: %v\n", r.RootCalculationTime)
+			fmt.Printf("  Rounds completed: %d/%d\n", len(r.RoundResults), r.NumRounds)
+			fmt.Printf("  Total commitments: %d\n", r.TotalCommitments)
+			fmt.Printf("  Total generation: %v (%.2f commits/sec)\n", 
+				r.TotalGenerationTime, float64(r.TotalCommitments)/r.TotalGenerationTime.Seconds())
+			fmt.Printf("  Total SMT build: %v (%.2f leaves/sec)\n", 
+				r.TotalSMTBuildTime, float64(r.TotalCommitments)/r.TotalSMTBuildTime.Seconds())
+			fmt.Printf("  Total root calc: %v\n", r.TotalRootCalcTime)
 			if submitToAgg {
-				fmt.Printf("  Aggregator Submit: %v\n", r.AggregatorSubmitTime)
-				if r.InclusionProof != nil {
-					fmt.Printf("  Inclusion Proof Wait: %v\n", r.InclusionProofWaitTime)
-					fmt.Printf("  Inclusion Proof Details:\n")
-					fmt.Printf("    Merkle Root: %s\n", r.InclusionProof.MerkleTreePath.Root)
-					fmt.Printf("    Proof Steps: %d\n", len(r.InclusionProof.MerkleTreePath.Steps))
-					fmt.Printf("    Transaction Hash: %s\n", r.InclusionProof.TransactionHash)
-				}
+				fmt.Printf("  Total aggregator submit: %v\n", r.TotalAggregatorTime)
+				fmt.Printf("  Total inclusion proof wait: %v\n", r.TotalInclusionProofTime)
 			}
-			fmt.Printf("  Total: %v\n", r.TotalTime)
-			fmt.Printf("  Root Hash: %s\n", r.RootHash)
+			fmt.Printf("  Total time: %v\n", r.TotalTime)
+			
+			// Print details for each round
+			fmt.Printf("  Round details:\n")
+			for _, round := range r.RoundResults {
+				fmt.Printf("    Round %d: %d commits, %v total (%.2f commits/sec)",
+					round.RoundNum, round.NumCommitments, round.TotalTime,
+					float64(round.NumCommitments)/round.TotalTime.Seconds())
+				if submitToAgg && round.AggregatorResponse != "" {
+					fmt.Printf(" - %s", round.AggregatorResponse)
+				}
+				fmt.Println()
+			}
 			fmt.Println()
 		}
 	}

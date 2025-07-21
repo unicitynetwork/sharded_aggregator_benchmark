@@ -1079,6 +1079,10 @@ func runCombinedMode(numCommitments, numThreads, numRounds int, submitToAgg bool
 		
 		fmt.Printf("\nPhase 1 complete: Generated %d total commitments in %v\n", 
 			len(allCommitments), time.Since(generationStartTime))
+		if len(allCommitments) != len(allLeafValues) {
+			fmt.Printf("WARNING: Commitment/leaf count mismatch! Commitments: %d, Unique leaves: %d\n", 
+				len(allCommitments), len(allLeafValues))
+		}
 		
 		// Phase 2: Build combined SMT
 		fmt.Printf("\nPhase 2: Building combined SMT with %d leaves...\n", len(allLeafValues))
@@ -1111,7 +1115,7 @@ func runCombinedMode(numCommitments, numThreads, numRounds int, submitToAgg bool
 			startAgg := time.Now()
 			
 			hostID := getHostID()
-			response, requestID, err := submitToAggregator(hostID, -1, root, len(allCommitments), aggregatorPrivKey)
+			response, requestID, err := submitToAggregator(hostID, -1, root, len(allLeafValues), aggregatorPrivKey)
 			
 			if err != nil {
 				fmt.Printf("Aggregator submission error: %v\n", err)
@@ -1134,7 +1138,8 @@ func runCombinedMode(numCommitments, numThreads, numRounds int, submitToAgg bool
 		
 		roundTime := time.Since(roundStartTime)
 		fmt.Printf("\nRound %d complete in %v\n", roundNum, roundTime)
-		fmt.Printf("  Total commitments: %d\n", len(allCommitments))
+		fmt.Printf("  Total commitments generated: %d\n", len(allCommitments))
+		fmt.Printf("  Unique leaves in tree: %d\n", len(allLeafValues))
 		fmt.Printf("  Throughput: %.2f commits/sec\n", float64(len(allCommitments))/roundTime.Seconds())
 		
 		// Clear memory
@@ -1211,6 +1216,10 @@ func runCombinedModeDuration(duration time.Duration, numThreads, numRounds int, 
 		
 		fmt.Printf("\nPhase 1 complete: Generated %d total commitments in %v\n", 
 			len(allCommitments), time.Since(generationStartTime))
+		if len(allCommitments) != len(allLeafValues) {
+			fmt.Printf("WARNING: Commitment/leaf count mismatch! Commitments: %d, Unique leaves: %d\n", 
+				len(allCommitments), len(allLeafValues))
+		}
 		
 		// If no commitments were generated, skip this round
 		if len(allCommitments) == 0 {
@@ -1249,7 +1258,7 @@ func runCombinedModeDuration(duration time.Duration, numThreads, numRounds int, 
 			startAgg := time.Now()
 			
 			hostID := getHostID()
-			response, requestID, err := submitToAggregator(hostID, -1, root, len(allCommitments), aggregatorPrivKey)
+			response, requestID, err := submitToAggregator(hostID, -1, root, len(allLeafValues), aggregatorPrivKey)
 			
 			if err != nil {
 				fmt.Printf("Aggregator submission error: %v\n", err)
@@ -1272,7 +1281,8 @@ func runCombinedModeDuration(duration time.Duration, numThreads, numRounds int, 
 		
 		roundTime := time.Since(roundStartTime)
 		fmt.Printf("\nRound %d complete in %v\n", roundNum, roundTime)
-		fmt.Printf("  Total commitments: %d\n", len(allCommitments))
+		fmt.Printf("  Total commitments generated: %d\n", len(allCommitments))
+		fmt.Printf("  Unique leaves in tree: %d\n", len(allLeafValues))
 		fmt.Printf("  Throughput: %.2f commits/sec\n", float64(len(allCommitments))/duration.Seconds())
 		
 		// Clear memory

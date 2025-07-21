@@ -118,6 +118,27 @@ benchmark-aggregator-nt: build
 	@echo "Running aggregator benchmark with $(N) commitments on $(T) threads..."
 	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -n $(N) -t $(T) -s
 
+# Duration-based benchmarks
+benchmark-duration: build
+	@if [ -z "$(D)" ]; then \
+		echo "Error: Please specify D=<duration> (e.g., make benchmark-duration D=1s)"; \
+		exit 1; \
+	fi
+	@echo "Running duration benchmark for $(D)..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -d $(D) $(ARGS)
+
+benchmark-duration-1s: build
+	@echo "Running benchmark for 1 second with 4 threads..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -d 1s -t 4
+
+benchmark-duration-aggregator: build
+	@if [ -z "$(D)" ] || [ -z "$(T)" ]; then \
+		echo "Error: Please specify D=<duration> T=<threads> (e.g., make benchmark-duration-aggregator D=1s T=4)"; \
+		exit 1; \
+	fi
+	@echo "Running duration benchmark for $(D) with $(T) threads and aggregator submission..."
+	@./$(BUILD_DIR)/smt-benchmark-threaded-aggregator -d $(D) -t $(T) -s
+
 # Docker commands
 docker-build:
 	@echo "Building Docker image..."

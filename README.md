@@ -71,6 +71,11 @@ make benchmark-threaded-cpu          # Use all CPU cores
 # Aggregator submission benchmarks
 make benchmark-aggregator            # Default with aggregator submission
 make benchmark-aggregator-nt N=100 T=4  # 100 commits/thread, 4 threads, submit to aggregator
+
+# Duration-based benchmarks
+make benchmark-duration D=1s         # Run for 1 second
+make benchmark-duration-1s           # Run for 1 second with 4 threads
+make benchmark-duration-aggregator D=1s T=8  # Run for 1s, 8 threads, submit to aggregator
 ```
 
 #### Direct Execution
@@ -245,12 +250,15 @@ Usage: smt-benchmark-threaded-aggregator [options] [commitments_per_thread] [thr
 Options:
   -n, --count     Number of commitments per thread (default: 1)
   -t, --threads   Number of threads (default: 1)
+  -d, --duration  Duration to run (e.g., 1s, 500ms). Overrides -n
   -s, --submit    Submit tree roots to Unicity aggregator
 
 Examples:
   smt-benchmark-threaded-aggregator -s                    # Submit 1 root from 1 thread
   smt-benchmark-threaded-aggregator 100 4 -s              # 100 commits/thread, 4 threads
   smt-benchmark-threaded-aggregator -n 1000 -t 8 -s       # 1000/thread, 8 threads, submit
+  smt-benchmark-threaded-aggregator -d 1s -t 4 -s         # Run for 1 second, 4 threads, submit
+  smt-benchmark-threaded-aggregator -d 500ms -t 8         # Run for 500ms, 8 threads
 ```
 
 ## Development
